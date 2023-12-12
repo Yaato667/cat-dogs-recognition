@@ -1,47 +1,38 @@
-# On utilise les imports suivants pour inclure PyTorch dans notre projet
-import os
-import torch
-from torch import nn
-
-# On doit ensuite dire à PyTorch quel matériel cibler sur la machine pour effectuer nos opération
-device = (
-    "cuda" if torch.cuda.is_available() # GPU nvidia
-    else "mps" if torch.backends.mps.is_available() # ertains systèmes Mac
-    else "cpu" # Le reste
-)
-
-print(f"{device} is being used")
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
-from torchvision import transforms
+from torchvision import transforms, models
 import matplotlib.pyplot as plt
+from sklearn.metrics import precision_score
 
+# Assuming 'device' is defined and contains the PyTorch device (e.g., cuda or cpu)
+# You can define it as follows:
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-# Define the Perceptron class
-class Perceptron(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.archiNN = nn.Sequential(
-            nn.Linear(64 * 64 * 3, 1),  # Adjust the input size to match the flattened image size
-            nn.Sigmoid()
-        )
+# Redéfinir la classe du modèle en utilisant une architecture CNN (ResNet18)
+class ImageClassifier(nn.Module):
+    def __init__(self, num_classes=1):
+        super(ImageClassifier, self).__init__()
+        self.resnet18 = models.resnet18(pretrained=True)
+        in_features = self.resnet18.fc.in_features
+        self.resnet18.fc = nn.Linear(in_features, num_classes)
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        out = self.archiNN(x)
-        return out
+        x = self.resnet18(x)
+        x = self.sigmoid(x)
+        return x
 
-# Instantiate the Perceptron and move it to the specified device
-monPerceptron = Perceptron().to(device)
+# Instantiate the model and move it to the specified device
+image_classifier = ImageClassifier().to(device)
 
 # Define data transformations
 transform = transforms.Compose([
-    transforms.Resize((64, 64)),
-    transforms.ToTensor()
+    transforms.Resize((224, 224)),  # Resize to match ResNet input size
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalize with ImageNet mean and std
 ])
 
 # Load the training data
@@ -50,74 +41,77 @@ train_dataset = ImageFolder(root='/content/train', transform=transform)
 # Load the testing data
 test_dataset = ImageFolder(root='/content/test', transform=transform)
 
-# Define data loaders
-train_loader = DataLoader(dataset=train_dataset, batch_size=32, shuffle=True)
-test_loader = DataLoader(dataset=test_dataset, batch_size=32, shuffle=False)
+# Define data loaders with num_workers
+train_loader = DataLoader(dataset=train_dataset, batch_size=32, shuffle=True, num_workers=4)
+test_loader = DataLoader(dataset=test_dataset, batch_size=32, shuffle=False, num_workers=4)
 
-# Define loss function and optimizer
+# Define loss function and optimizer (use Adam optimizer)
 criterion = nn.BCELoss()
-optimizer = optim.SGD(monPerceptron.parameters(), lr=0.1)
+optimizer = optim.Adam(image_classifier.parameters(), lr=0.001)
 
-# Lists to store training information
-train_losses = []
-test_accuracies = []
+# Function to train the model
+def train(train_loader, model, criterion, optimizer):
+    model.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
 
-num_epochs = 10
-for epoch in range(num_epochs):
     for inputs, labels in train_loader:
-        batch_size = inputs.size(0)  # Get the current batch size
-        inputs, labels = inputs.view(batch_size, -1).to(device), labels.float().view(batch_size, 1).to(device)
+        inputs, labels = inputs.to(device), labels.float().view(-1, 1).to(device)
 
-        # Forward pass
-        outputs = monPerceptron(inputs)
-        loss = criterion(outputs, labels)
-
-        # Backward pass and optimization
         optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
 
-    # Save training loss
-    train_losses.append(loss.item())
+        running_loss += loss.item()
+        predicted = (outputs > 0.5).float()
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
 
-    # Testing loop
-    monPerceptron.eval()
-    with torch.no_grad():
-        correct = 0
-        total = 0
-        for inputs, labels in test_loader:
-            batch_size = inputs.size(0)  # Get the current batch size
-            inputs, labels = inputs.view(batch_size, -1).to(device), labels.float().view(batch_size, 1).to(device)
-            outputs = monPerceptron(inputs)
-            predicted = (outputs > 0.5).float()
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+    accuracy = correct / total
+    precision = precision_score(labels.cpu().numpy(), predicted.cpu().numpy(), average='binary')
 
-        accuracy = correct / total
-        test_accuracies.append(accuracy)
+    return running_loss / len(train_loader), accuracy, precision
 
-    monPerceptron.train()  # Set the model back to training mode
+# Lists to store training information
+train_losses = []
+train_accuracies = []
+train_precisions = []
 
-    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item()}, Test Accuracy: {accuracy * 100:.2f}%')
+test_losses = []
+test_accuracies = []
+test_precisions = []
 
-# Plot training loss and test accuracy curves
-plt.figure(figsize=(12, 4))
+num_epochs = 10
+for epoch in range(num_epochs):
+    print(f"\nEpoch {epoch + 1}/{num_epochs}\n-------------------------------")
 
-# Plot Training Loss
-plt.subplot(1, 2, 1)
-plt.plot(train_losses, label='Training Loss')
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.title('Training Loss Curve')
-plt.legend()
+    # Entraînement
+    train_loss, train_accuracy, train_precision = train(train_loader, image_classifier, criterion, optimizer)
+    train_losses.append(train_loss)
+    train_accuracies.append(train_accuracy)
+    train_precisions.append(train_precision)
+    print(f'Training Loss: {train_loss}, Accuracy: {train_accuracy}, Precision: {train_precision}')
 
-# Plot Test Accuracy
-plt.subplot(1, 2, 2)
-plt.plot(test_accuracies, label='Test Accuracy', color='orange')
-plt.xlabel('Epochs')
-plt.ylabel('Accuracy')
-plt.title('Test Accuracy Curve')
-plt.legend()
+    # Validation
+    test_loss, test_accuracy, test_precision = test(test_loader, image_classifier, criterion)
+    test_losses.append(test_loss)
+    test_accuracies.append(test_accuracy)
+    test_precisions.append(test_precision)
+    print(f'Testing Loss: {test_loss}, Accuracy: {test_accuracy}, Precision: {test_precision}')
 
-plt.tight_layout()
-plt.show()
+# Fonction pour tracer les métriques
+def plot_metrics(train_values, test_values, metric_name):
+    plt.plot(train_values, label=f'Training {metric_name}')
+    plt.plot(test_values, label=f'Testing {metric_name}')
+    plt.xlabel('Epoch')
+    plt.ylabel(metric_name)
+    plt.legend()
+    plt.show()
+
+# Tracer les métriques
+plot_metrics(train_losses, test_losses, 'Loss')
+plot_metrics(train_accuracies, test_accuracies, 'Accuracy')
+plot_metrics(train_precisions, test_precisions, 'Precision')
